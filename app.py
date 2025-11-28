@@ -10,7 +10,7 @@ from duckduckgo_search import DDGS
 # ==========================================
 # 🔒 セキュリティ設定 (パスワード制限)
 # ==========================================
-# 
+# 任意のパスワードに変更してください
 LOGIN_PASSWORD = "password" 
 
 # サイドバーでパスワード入力を求める
@@ -21,28 +21,27 @@ with st.sidebar:
 # パスワードが一致しない場合、ここで処理を止める
 if input_password != LOGIN_PASSWORD:
     st.warning("👈 サイドバーにパスワードを入力してください。")
-    st.stop()  # ここでプログラムが強制停止します
-    
-# ---------------------------------------------------------
-# 設定: 解析用にはSSL警告を無視する
-# ---------------------------------------------------------
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    st.stop()
 
 # ==========================================
-# 検索機能
+# 設定 & ヘルパー関数
 # ==========================================
+
+# SSL無視設定
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 def get_search_results(keyword, max_results=10):
+    """ DuckDuckGo検索 (エラーハンドリング付き) """
     results = []
     try:
         with DDGS() as ddgs:
             ddg_gen = ddgs.text(keyword, region='jp-jp', timelimit='y', max_results=max_results, backend='html')
-            for r in ddg_gen: results.append(r)
-    except: return None
+            for r in ddg_gen:
+                results.append(r)
+    except Exception:
+        return None
     return results
 
-# ==========================================
-# ヘルパー関数 (コード生成)
-# ==========================================
 def generate_local_schema(name, url, phone="03-xxxx-xxxx"):
     data = {
         "@context": "https://schema.org",
@@ -67,14 +66,12 @@ def generate_table_html():
     return """<table><thead><tr><th>コース名</th><th>料金(税込)</th></tr></thead><tbody><tr><td>レギュラー</td><td>10,000円</td></tr></tbody></table>"""
 
 # ==========================================
-# 診断ロジック
+# 診断ロジック関数群
 # ==========================================
 
 def get_page_content(url):
-    """ 解析用: SSLエラーを無視してHTMLを取得 """
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36'}
-        # verify=False で無理やり読み込む
         response = requests.get(url, headers=headers, timeout=15, verify=False)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -90,7 +87,7 @@ def analyze_keywords(soup, target_keywords_str):
 
     unit_points = 20 / (len(keywords) * 3)
     title = soup.title.string if soup.title else ""
-
+    
     h1_tags = soup.find_all('h1')
     h1_text_list = []
     for tag in h1_tags:
@@ -119,12 +116,13 @@ def check_local_elements(soup):
     for iframe in iframes:
         src = (iframe.get('src') or "") + (iframe.get('data-src') or "") + (iframe.get('data-lazy-src') or "")
         if any(p in src for p in map_patterns): has_map = True; break
+    
     if not has_map:
         scripts = soup.find_all('script')
         for script in scripts:
             src = script.get('src') or ""
             if "maps.googleapis.com" in src: has_map = True; break
-
+    
     js_map_trace = False
     if not has_map:
         if len(soup.find_all('div', id=re.compile(r'map|Map'), class_=re.compile(r'map|Map'))) > 0: js_map_trace = True
@@ -148,15 +146,11 @@ def check_qa_and_structure(soup):
     return tasks
 
 def check_trust_signals(soup, url):
-    """ ④ 信頼性・E-E-A-T (配点20) - SSL厳格チェック追加版 """
     tasks = []
     text = soup.get_text()
-
-    # 1. 運営者情報
     auth_keywords = ["監修", "責任者", "代表", "運営", "プロフィール", "会社概要", "企業情報", "Company", "About"]
     has_auth = any(k in text for k in auth_keywords)
 
-    # 2. ポリシーリンク
     a_tags = soup.find_all('a', href=True)
     policy_keywords = ["privacy", "policy", "プライバシー", "個人情報", "保護方針"]
     has_policy = False
@@ -167,37 +161,26 @@ def check_trust_signals(soup, url):
             has_policy = True; break
     if not has_policy: has_policy = "個人情報保護方針" in text or "プライバシーポリシー" in text
 
-    # 3. SSLチェック (二段階判定)
     is_https_scheme = urlparse(url).scheme == "https"
     ssl_valid = False
-
     if not is_https_scheme:
-        # そもそも http:// である
         tasks.append({"msg": "常時SSL化(https)対応", "points": 10, "tag": "trust"})
     else:
-        # https:// だが、証明書が正しいかチェックする (verify=True)
         try:
-            # タイムアウト短めで厳格チェック
             requests.get(url, timeout=5, verify=True)
             ssl_valid = True
         except requests.exceptions.SSLError:
-            # SSLエラーが発生 (証明書不備、期限切れ、オレオレ証明書など)
             tasks.append({"msg": "SSL証明書の不備修正 (鍵マークが無効です)", "points": 10, "tag": "trust"})
         except:
-            # その他の接続エラーは一旦スルー(解析用では読めているので)
-            ssl_valid = True
+            ssl_valid = True 
 
     if not has_auth: tasks.append({"msg": "運営者情報リンクの設置", "points": 10, "tag": "trust"})
-
-    # ポリシーはHTTPSかつリンクがある場合のみ完全OK
     if is_https_scheme and ssl_valid and not has_policy:
          tasks.append({"msg": "プライバシーポリシーへのリンク設置", "points": 10, "tag": "trust"})
-
     return tasks
 
 def check_tech_schema(soup, base_url):
     tasks = []
-    # llms.txtは存在すればOK (SSL無視)
     try:
         if requests.get(urljoin(base_url, "/llms.txt"), timeout=3, verify=False).status_code != 200:
              tasks.append({"msg": "llms.txtの設置", "points": 5, "tag": "tech"})
@@ -214,7 +197,7 @@ def check_tech_schema(soup, base_url):
                 for item in data:
                     if "@type" in item: found_types.append(item["@type"])
         except: continue
-
+    
     if "FAQPage" not in found_types: tasks.append({"msg": "FAQPage構造化データの記述", "points": 5, "tag": "faq_code"})
     local_types = ["LocalBusiness", "SportsActivityLocation", "ExerciseGym", "Store", "Restaurant"]
     if not any(t in found_types for t in local_types): tasks.append({"msg": "LocalBusiness構造化データの記述", "points": 10, "tag": "local_code"})
@@ -224,6 +207,9 @@ def check_tech_schema(soup, base_url):
 # UI構築
 # ==========================================
 st.set_page_config(page_title="店舗AIO改善提案", layout="wide")
+# 検索除け
+st.markdown("""<meta name="robots" content="noindex">""", unsafe_allow_html=True)
+
 st.title("🛡️ AIO/LLMO 診断チェッカー")
 
 st.info("""
@@ -248,26 +234,23 @@ with st.container():
         target_url = st.text_input("店舗URL", placeholder="https://...")
     with col2:
         keywords_input = st.text_input("狙うキーワード", placeholder="エリア 業種 おすすめ")
-
+    
     analyze_btn = st.button("診断スタート", type="primary")
 
-# 解析ロジック
 if analyze_btn and target_url:
-    with st.spinner("解析・競合調査・SSL強度判定中..."):
-        # 1. 自社サイト解析 (verify=Falseで中身を取得)
+    with st.spinner("解析・競合調査中..."):
         soup, status = get_page_content(target_url)
         if soup:
             t1 = analyze_keywords(soup, keywords_input)
             t2 = check_local_elements(soup)
             t3 = check_qa_and_structure(soup)
-            t4 = check_trust_signals(soup, target_url) # ここでSSL厳格チェックを実行
+            t4 = check_trust_signals(soup, target_url)
             t5 = check_tech_schema(soup, target_url)
-
+            
             st.session_state.tasks = t1 + t2 + t3 + t4 + t5
             st.session_state.meta_data = {"url": target_url, "name": company_name, "keyword": keywords_input}
             st.session_state.analyzed = True
-
-            # 2. 検索実行
+            
             if keywords_input:
                 results = get_search_results(keywords_input)
                 if results is None:
@@ -279,19 +262,15 @@ if analyze_btn and target_url:
         else:
             st.error(f"エラー: {status}")
 
-# 結果画面
 if st.session_state.analyzed:
-
-    # 検索結果（競合一覧）エリア
+    
     st.divider()
     st.subheader("📊 検索上位サイト (AIの参照元候補)")
-
+    
     if st.session_state.search_error:
         st.error("⚠️ 検索結果の自動取得が制限されました。")
-        st.markdown(f"以下のボタンで、実際のGoogle検索結果を直接確認してください。")
         google_url = f"https://www.google.com/search?q={quote(st.session_state.meta_data['keyword'])}"
         st.link_button("Google検索結果を別タブで開く", google_url)
-
     elif st.session_state.search_results:
         st.markdown("以下のサイトに「御社の名前」が掲載されているか確認してください。")
         with st.expander("上位10サイトを表示", expanded=True):
@@ -305,11 +284,10 @@ if st.session_state.analyzed:
     else:
         st.warning("検索結果が見つかりませんでした。")
 
-    # スコア計算
     current_deduction = 0
     st.divider()
     c1, c2 = st.columns([1, 2])
-
+    
     with c2:
         st.subheader("📝 改善タスク (Check to Resolve)")
         if not st.session_state.tasks:
@@ -322,19 +300,17 @@ if st.session_state.analyzed:
                 checked = st.checkbox(label, key=f"task_{i}")
                 if not checked:
                     current_deduction += task['points']
-
+    
     final_score = max(0, int(100 - current_deduction))
-
+    
     with c1:
         st.metric("現在のAIO適合スコア", f"{final_score} / 100")
         st.progress(final_score / 100)
-
         if final_score >= 80: st.info("サイト内部は合格圏内です。")
         else: st.warning("改善の余地があります。")
 
-    # コード生成
     st.divider()
-    st.subheader("💡 必要な改善コードサンプル")
+    st.subheader("💡 必要な改善コード")
     has_code = False
     active_tags = [st.session_state.tasks[i]['tag'] for i in range(len(st.session_state.tasks)) if not st.session_state.get(f"task_{i}", False)]
 
@@ -352,7 +328,7 @@ if st.session_state.analyzed:
         st.markdown("#### 3. 料金表などのHTML記述例")
         st.code(generate_table_html(), language='html')
         has_code = True
-
+        
     if "nap" in active_tags:
         st.markdown("#### 4. 電話番号リンク記述例")
         st.code('<a href="tel:03-xxxx-xxxx">03-xxxx-xxxx</a>', language='html')
@@ -360,26 +336,3 @@ if st.session_state.analyzed:
 
     if not has_code:
         st.caption("現在表示すべきコードはありません。")
-
-  # 1. 最新のライブラリをインストール
-!pip install -U -q duckduckgo_search streamlit
-
-# 2. Cloudflare Tunnel をダウンロード
-!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-!chmod +x cloudflared-linux-amd64
-
-# 3. Streamlitをバックグラウンドで起動
-import subprocess
-subprocess.Popen(["streamlit", "run", "app.py"])
-
-# 4. トンネルを作成してURLを表示
-import time
-print("🚀 アプリを起動しています... しばらくお待ち下さい (約10秒)")
-time.sleep(5)
-
-with open('cloudflared.log', 'w') as f:
-    subprocess.Popen(['./cloudflared-linux-amd64', 'tunnel', '--url', 'http://localhost:8501'], stdout=f, stderr=f)
-
-time.sleep(8)
-print("\n👇 以下のURLをクリックして診断ツールを開いてください（パスワード不要）")
-!grep -o 'https://.*\.trycloudflare.com' cloudflared.log | head -n 1
